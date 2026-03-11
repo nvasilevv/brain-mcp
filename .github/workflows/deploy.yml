@@ -1,0 +1,66 @@
+name: Deploy brain-mcp to Hetzner
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🚚 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 📁 Create Deployment Directory
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            mkdir -p /root/brain-mcp
+
+      - name: 📤 Copy Files to Server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "docker-compose.yml,Dockerfile,requirements.txt,src"
+          target: "/root/brain-mcp/"
+
+      - name: 🔑 Write .env File
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          API_KEY: ${{ secrets.BRAIN_API_KEY }}
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: API_KEY
+          script: |
+            cat > /root/brain-mcp/.env <<EOF
+            QDRANT_HOST=http://qdrant:6333
+            COLLECTION_NAME=my_thoughts
+            API_KEY=${API_KEY}
+            EOF
+            chmod 600 /root/brain-mcp/.env
+
+      - name: 🚀 Build and Start Docker Containers
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # Ensure the shared Caddy network exists
+            docker network create web-proxy || true
+
+            cd /root/brain-mcp
+            docker compose up --build -d --remove-orphans

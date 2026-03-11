@@ -1,0 +1,32 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+      - ./qdrant_snapshots:/qdrant/snapshots
+    networks:
+      - brain-internal
+
+  brain:
+    build: .
+    container_name: brain-mcp
+    env_file:
+      - .env
+    environment:
+      QDRANT_HOST: http://qdrant:6333
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+    networks:
+      - web-proxy
+      - brain-internal
+
+networks:
+  web-proxy:
+    external: true
+  brain-internal:
+    driver: bridge
