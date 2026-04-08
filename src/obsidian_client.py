@@ -1,6 +1,9 @@
 import base64
+import hashlib
 import json
+import os
 import time
+import uuid
 
 import requests
 from cryptography.hazmat.primitives import hashes
@@ -37,6 +40,10 @@ def _base() -> str:
 def _b64decode(s: str) -> bytes:
     s += "=" * (-len(s) % 4)
     return base64.b64decode(s)
+
+
+def _b64encode(data: bytes) -> str:
+    return base64.b64encode(data).rstrip(b"=").decode("ascii")
 
 
 def _get_pbkdf2salt() -> bytes:
@@ -82,6 +89,22 @@ def _decrypt(encrypted: str) -> str:
     return plaintext.decode("utf-8")
 
 
+def _encrypt(plaintext: str) -> str:
+    """Encrypt a string to LiveSync HKDF format, returning %=... encoded string."""
+    iv = os.urandom(IV_LENGTH)
+    hkdf_salt = os.urandom(HKDF_SALT_LENGTH)
+
+    chunk_key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=hkdf_salt,
+        info=b"",
+    ).derive(_get_master_key())
+
+    ciphertext = AESGCM(chunk_key).encrypt(iv, plaintext.encode("utf-8"), None)
+    return ENCRYPTED_PREFIX + _b64encode(iv + hkdf_salt + ciphertext)
+
+
 def _decrypt_meta(path_field: str) -> dict:
     """Decrypt an encrypted path field (/\\:...) and return the full metadata dict.
     Contains: path, mtime, ctime, size, children (the real chunk IDs).
@@ -92,6 +115,11 @@ def _decrypt_meta(path_field: str) -> dict:
         return json.loads(decrypted)
     except json.JSONDecodeError:
         return {"path": decrypted, "children": []}
+
+
+def _encrypt_meta(meta: dict) -> str:
+    """Encrypt a metadata dict to LiveSync /\\:... path field format."""
+    return ENCRYPTED_META_PREFIX + _encrypt(json.dumps(meta, separators=(",", ":")))
 
 
 def _build_path_index(refresh: bool = False) -> dict[str, tuple[str, list]]:
@@ -162,40 +190,80 @@ def read_note(path: str) -> str:
 
 
 def write_note(path: str, content: str) -> None:
-    """Create or update a note at the given vault path."""
-    import hashlib
-
+    """Create or update a note at the given vault path with proper LiveSync encryption."""
     index = _build_path_index()
     s = _session()
     now = int(time.time() * 1000)
 
+    # Build chunk(s). Use a single chunk for simplicity; LiveSync handles any size.
+    children: list[str] = []
+    if content:
+        chunk_id = "h:" + uuid.uuid4().hex
+        encrypted_chunk = _encrypt(content)
+        chunk_doc = {
+            "_id": chunk_id,
+            "type": "leaf",
+            "data": encrypted_chunk,
+        }
+        s.put(
+            f"{_base()}/{requests.utils.quote(chunk_id, safe='')}",
+            json=chunk_doc,
+        ).raise_for_status()
+        children = [chunk_id]
+
+    # Preserve ctime if note already exists
+    ctime = now
     if path in index:
         doc_id, _ = index[path]
         existing_resp = s.get(f"{_base()}/{requests.utils.quote(doc_id, safe='')}")
         existing_resp.raise_for_status()
         existing = existing_resp.json()
-        doc: dict = {
-            **existing,
-            "data": content,
-            "mtime": now,
-            "size": len(content.encode()),
-            "deleted": False,
-            "children": [],
-        }
+        try:
+            old_meta = _decrypt_meta(existing.get("path", ""))
+            ctime = old_meta.get("ctime", now)
+        except Exception:
+            pass
     else:
         doc_id = "f:" + hashlib.sha256(path.encode()).hexdigest()
+        existing = None
+
+    meta = {
+        "path": path,
+        "mtime": now,
+        "ctime": ctime,
+        "size": len(content.encode("utf-8")),
+        "children": children,
+    }
+    encrypted_path = _encrypt_meta(meta)
+
+    if existing is not None:
+        doc: dict = {
+            **existing,
+            "path": encrypted_path,
+            "mtime": now,
+            "size": len(content.encode("utf-8")),
+            "deleted": False,
+            "children": [],  # plaintext placeholder — real children live in encrypted path
+            "type": "plain",
+        }
+        # Remove stale plaintext data field if present
+        doc.pop("data", None)
+    else:
         doc = {
             "_id": doc_id,
-            "path": path,
-            "data": content,
+            "path": encrypted_path,
             "type": "plain",
             "mtime": now,
-            "ctime": now,
-            "size": len(content.encode()),
+            "ctime": ctime,
+            "size": len(content.encode("utf-8")),
             "deleted": False,
-            "children": [],
+            "children": [],  # plaintext placeholder
         }
 
-    s.put(f"{_base()}/{requests.utils.quote(doc_id, safe='')}", json=doc).raise_for_status()
-    # Update cache so the new note shows up on next list
-    _path_index[path] = (doc_id, [])
+    s.put(
+        f"{_base()}/{requests.utils.quote(doc_id, safe='')}",
+        json=doc,
+    ).raise_for_status()
+
+    # Update in-memory cache so subsequent reads/writes in the same process work
+    _path_index[path] = (doc_id, children)  # type: ignore[index]
