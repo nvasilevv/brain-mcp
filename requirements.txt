@@ -4,3 +4,4 @@ uvicorn[standard]
 qdrant-client
 sentence-transformers
 pydantic-settings
+requests

@@ -6,6 +6,11 @@ class Settings(BaseSettings):
     collection_name: str = "my_thoughts"
     api_key: str = ""
 
+    couchdb_url: str = "http://couchdb:5984"
+    couchdb_user: str = ""
+    couchdb_password: str = ""
+    couchdb_db: str = "obsidian"
+
     class Config:
         env_file = ".env"
 

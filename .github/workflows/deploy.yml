@@ -39,16 +39,22 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         env:
           API_KEY: ${{ secrets.BRAIN_API_KEY }}
+          COUCHDB_USER: ${{ secrets.COUCHDB_USER }}
+          COUCHDB_PASSWORD: ${{ secrets.COUCHDB_PASSWORD }}
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: API_KEY
+          envs: API_KEY,COUCHDB_USER,COUCHDB_PASSWORD
           script: |
             cat > /root/brain-mcp/.env <<EOF
             QDRANT_HOST=http://qdrant:6333
             COLLECTION_NAME=my_thoughts
             API_KEY=${API_KEY}
+            COUCHDB_URL=http://couchdb:5984
+            COUCHDB_USER=${COUCHDB_USER}
+            COUCHDB_PASSWORD=${COUCHDB_PASSWORD}
+            COUCHDB_DB=obsidian
             EOF
             chmod 600 /root/brain-mcp/.env
 
