@@ -17,7 +17,11 @@ ENCRYPTED_PREFIX = "%="
 ENCRYPTED_META_PREFIX = "/\\:"
 SYNC_PARAMS_ID = "_local/obsidian_livesync_sync_parameters"
 
+# Caches
 _pbkdf2salt_cache: bytes | None = None
+_master_key_cache: bytes | None = None
+# path → doc_id index, populated on first list/read
+_path_index: dict[str, str] | None = None
 
 
 def _session() -> requests.Session:
@@ -31,7 +35,6 @@ def _base() -> str:
 
 
 def _b64decode(s: str) -> bytes:
-    # Add padding if needed
     s += "=" * (-len(s) % 4)
     return base64.b64decode(s)
 
@@ -42,13 +45,25 @@ def _get_pbkdf2salt() -> bytes:
         s = _session()
         resp = s.get(f"{_base()}/{SYNC_PARAMS_ID}")
         resp.raise_for_status()
-        raw = resp.json()["pbkdf2salt"]
-        _pbkdf2salt_cache = _b64decode(raw)
+        _pbkdf2salt_cache = _b64decode(resp.json()["pbkdf2salt"])
     return _pbkdf2salt_cache
 
 
+def _get_master_key() -> bytes:
+    """Derive master key from passphrase + pbkdf2salt. Cached — runs PBKDF2 only once."""
+    global _master_key_cache
+    if _master_key_cache is None:
+        _master_key_cache = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=_get_pbkdf2salt(),
+            iterations=PBKDF2_ITERATIONS,
+        ).derive(settings.obsidian_passphrase.encode())
+    return _master_key_cache
+
+
 def _decrypt(encrypted: str) -> str:
-    """Decrypt a LiveSync HKDF-encrypted string (%=...)."""
+    """Decrypt a LiveSync HKDF-encrypted string (%=...). Uses cached master key."""
     assert encrypted.startswith(ENCRYPTED_PREFIX), f"Unexpected prefix: {encrypted[:4]}"
     data = _b64decode(encrypted[len(ENCRYPTED_PREFIX):])
 
@@ -56,24 +71,12 @@ def _decrypt(encrypted: str) -> str:
     hkdf_salt = data[IV_LENGTH:IV_LENGTH + HKDF_SALT_LENGTH]
     ciphertext = data[IV_LENGTH + HKDF_SALT_LENGTH:]
 
-    pbkdf2salt = _get_pbkdf2salt()
-    passphrase = settings.obsidian_passphrase.encode()
-
-    # PBKDF2: passphrase + pbkdf2salt → master key
-    master_key = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=pbkdf2salt,
-        iterations=PBKDF2_ITERATIONS,
-    ).derive(passphrase)
-
-    # HKDF: master key + hkdf_salt → chunk key
     chunk_key = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=hkdf_salt,
         info=b"",
-    ).derive(master_key)
+    ).derive(_get_master_key())
 
     plaintext = AESGCM(chunk_key).decrypt(iv, ciphertext, None)
     return plaintext.decode("utf-8")
@@ -83,46 +86,27 @@ def _decrypt_path(path_field: str) -> str:
     """Decrypt an encrypted path field (/\\:...) and return just the file path."""
     assert path_field.startswith(ENCRYPTED_META_PREFIX)
     decrypted = _decrypt(path_field[len(ENCRYPTED_META_PREFIX):])
-    # Decrypted value is a JSON object: {"path": "...", "mtime": ..., ...}
     try:
         return json.loads(decrypted)["path"]
     except (json.JSONDecodeError, KeyError):
-        return decrypted  # fallback: raw string
+        return decrypted
 
 
-def list_notes() -> list[str]:
-    """Return all note paths stored in the Obsidian vault."""
+def _build_path_index(refresh: bool = False) -> dict[str, str]:
+    """Build and cache a mapping of decrypted path → doc_id for all f: documents."""
+    global _path_index
+    if _path_index is not None and not refresh:
+        return _path_index
+
     s = _session()
     resp = s.get(f"{_base()}/_all_docs", params={"include_docs": "true"})
     resp.raise_for_status()
 
-    paths = []
+    index: dict[str, str] = {}
     for row in resp.json().get("rows", []):
         doc = row["doc"]
         doc_id = doc.get("_id", "")
-        path_field = doc.get("path", "")
-        if not doc_id.startswith("f:") or not path_field.startswith(ENCRYPTED_META_PREFIX):
-            continue
-        if doc.get("deleted"):
-            continue
-        try:
-            paths.append(_decrypt_path(path_field))
-        except Exception:
-            pass
-
-    return sorted(paths)
-
-
-def read_note(path: str) -> str:
-    """Return the markdown content of a note by its vault path."""
-    s = _session()
-    resp = s.get(f"{_base()}/_all_docs", params={"include_docs": "true"})
-    resp.raise_for_status()
-
-    target_doc = None
-    for row in resp.json().get("rows", []):
-        doc = row["doc"]
-        if not doc.get("_id", "").startswith("f:"):
+        if not doc_id.startswith("f:"):
             continue
         if doc.get("deleted"):
             continue
@@ -130,65 +114,67 @@ def read_note(path: str) -> str:
         if not path_field.startswith(ENCRYPTED_META_PREFIX):
             continue
         try:
-            if _decrypt_path(path_field) == path:
-                target_doc = doc
-                break
+            index[_decrypt_path(path_field)] = doc_id
         except Exception:
-            continue
+            pass
 
-    if target_doc is None:
+    _path_index = index
+    return _path_index
+
+
+def list_notes() -> list[str]:
+    """Return all note paths stored in the Obsidian vault."""
+    return sorted(_build_path_index().keys())
+
+
+def read_note(path: str) -> str:
+    """Return the markdown content of a note by its vault path."""
+    index = _build_path_index()
+    doc_id = index.get(path)
+    if doc_id is None:
+        # Try refreshing the index once in case it's a new note
+        index = _build_path_index(refresh=True)
+        doc_id = index.get(path)
+    if doc_id is None:
         raise FileNotFoundError(f"Note '{path}' not found.")
 
-    children = target_doc.get("children", [])
+    s = _session()
+    resp = s.get(f"{_base()}/{requests.utils.quote(doc_id, safe='')}")
+    resp.raise_for_status()
+    doc = resp.json()
+
+    children = doc.get("children", [])
     if not children:
-        # Content may be inline
-        data = target_doc.get("data", "")
+        data = doc.get("data", "")
         if data.startswith(ENCRYPTED_PREFIX):
             return _decrypt(data)
         return data
 
-    # Fetch and decrypt each chunk
     parts = []
     for chunk_id in children:
         chunk_resp = s.get(f"{_base()}/{requests.utils.quote(chunk_id, safe='')}")
         chunk_resp.raise_for_status()
         chunk_data = chunk_resp.json().get("data", "")
-        if chunk_data.startswith(ENCRYPTED_PREFIX):
-            parts.append(_decrypt(chunk_data))
-        else:
-            parts.append(chunk_data)
+        parts.append(_decrypt(chunk_data) if chunk_data.startswith(ENCRYPTED_PREFIX) else chunk_data)
 
     return "".join(parts)
 
 
 def write_note(path: str, content: str) -> None:
-    """Create or update a note at the given vault path (stores unencrypted for LiveSync to pick up)."""
+    """Create or update a note at the given vault path."""
+    import hashlib
+
+    index = _build_path_index()
     s = _session()
     now = int(time.time() * 1000)
 
-    # Find existing doc by path
-    existing_doc = None
-    resp = s.get(f"{_base()}/_all_docs", params={"include_docs": "true"})
-    resp.raise_for_status()
-    for row in resp.json().get("rows", []):
-        doc = row["doc"]
-        if not doc.get("_id", "").startswith("f:"):
-            continue
-        path_field = doc.get("path", "")
-        if not path_field.startswith(ENCRYPTED_META_PREFIX):
-            continue
-        try:
-            if _decrypt_path(path_field) == path:
-                existing_doc = doc
-                break
-        except Exception:
-            continue
-
-    if existing_doc:
-        doc_id = existing_doc["_id"]
-        url = f"{_base()}/{requests.utils.quote(doc_id, safe='')}"
+    if path in index:
+        doc_id = index[path]
+        existing_resp = s.get(f"{_base()}/{requests.utils.quote(doc_id, safe='')}")
+        existing_resp.raise_for_status()
+        existing = existing_resp.json()
         doc: dict = {
-            **existing_doc,
+            **existing,
             "data": content,
             "mtime": now,
             "size": len(content.encode()),
@@ -196,9 +182,7 @@ def write_note(path: str, content: str) -> None:
             "children": [],
         }
     else:
-        import hashlib
         doc_id = "f:" + hashlib.sha256(path.encode()).hexdigest()
-        url = f"{_base()}/{requests.utils.quote(doc_id, safe='')}"
         doc = {
             "_id": doc_id,
             "path": path,
@@ -211,5 +195,6 @@ def write_note(path: str, content: str) -> None:
             "children": [],
         }
 
-    resp = s.put(url, json=doc)
-    resp.raise_for_status()
+    s.put(f"{_base()}/{requests.utils.quote(doc_id, safe='')}", json=doc).raise_for_status()
+    # Invalidate cache so the new note shows up on next list
+    _path_index[path] = doc_id
