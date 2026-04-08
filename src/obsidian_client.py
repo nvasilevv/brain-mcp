@@ -242,24 +242,26 @@ def write_note(path: str, content: str) -> None:
         doc: dict = {
             **existing,
             "path": encrypted_path,
-            "mtime": now,
-            "size": len(content.encode("utf-8")),
-            "deleted": False,
+            "mtime": 0,
+            "ctime": 0,
+            "size": 0,
             "children": [],  # plaintext placeholder — real children live in encrypted path
             "type": "plain",
+            "eden": {},
         }
-        # Remove stale plaintext data field if present
+        # Remove stale fields that don't belong in obfuscated docs
         doc.pop("data", None)
+        doc.pop("deleted", None)
     else:
         doc = {
             "_id": doc_id,
             "path": encrypted_path,
             "type": "plain",
-            "mtime": now,
-            "ctime": ctime,
-            "size": len(content.encode("utf-8")),
-            "deleted": False,
+            "mtime": 0,
+            "ctime": 0,
+            "size": 0,
             "children": [],  # plaintext placeholder
+            "eden": {},
         }
 
     s.put(
