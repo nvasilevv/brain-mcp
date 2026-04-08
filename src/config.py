@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     couchdb_user: str = ""
     couchdb_password: str = ""
     couchdb_db: str = "obsidian"
+    obsidian_passphrase: str = ""
 
     class Config:
         env_file = ".env"

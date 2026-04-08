@@ -41,11 +41,12 @@ jobs:
           API_KEY: ${{ secrets.BRAIN_API_KEY }}
           COUCHDB_USER: ${{ secrets.COUCHDB_USER }}
           COUCHDB_PASSWORD: ${{ secrets.COUCHDB_PASSWORD }}
+          OBSIDIAN_PASSPHRASE: ${{ secrets.OBSIDIAN_PASSPHRASE }}
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: API_KEY,COUCHDB_USER,COUCHDB_PASSWORD
+          envs: API_KEY,COUCHDB_USER,COUCHDB_PASSWORD,OBSIDIAN_PASSPHRASE
           script: |
             cat > /root/brain-mcp/.env <<EOF
             QDRANT_HOST=http://qdrant:6333
@@ -55,6 +56,7 @@ jobs:
             COUCHDB_USER=${COUCHDB_USER}
             COUCHDB_PASSWORD=${COUCHDB_PASSWORD}
             COUCHDB_DB=obsidian
+            OBSIDIAN_PASSPHRASE=${OBSIDIAN_PASSPHRASE}
             EOF
             chmod 600 /root/brain-mcp/.env
 
