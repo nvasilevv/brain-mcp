@@ -19,12 +19,14 @@ PBKDF2_ITERATIONS = 310_000
 ENCRYPTED_PREFIX = "%="
 ENCRYPTED_META_PREFIX = "/\\:"
 SYNC_PARAMS_ID = "_local/obsidian_livesync_sync_parameters"
+INDEX_TTL = 60  # seconds before path index is considered stale
 
 # Caches
 _pbkdf2salt_cache: bytes | None = None
 _master_key_cache: bytes | None = None
 # path → (doc_id, children) index, populated on first list/read
 _path_index: dict[str, tuple[str, list]] | None = None
+_path_index_ts: float = 0.0
 
 
 def _session() -> requests.Session:
@@ -125,9 +127,10 @@ def _encrypt_meta(meta: dict) -> str:
 def _build_path_index(refresh: bool = False) -> dict[str, tuple[str, list]]:
     """Build and cache a mapping of path → (doc_id, children) for all f: documents.
     children comes from the encrypted metadata (not the plaintext placeholder).
+    The cache expires after INDEX_TTL seconds so new notes from other clients appear.
     """
-    global _path_index
-    if _path_index is not None and not refresh:
+    global _path_index, _path_index_ts
+    if _path_index is not None and not refresh and (time.time() - _path_index_ts) < INDEX_TTL:
         return _path_index
 
     s = _session()
@@ -155,6 +158,7 @@ def _build_path_index(refresh: bool = False) -> dict[str, tuple[str, list]]:
             pass
 
     _path_index = index
+    _path_index_ts = time.time()
     return _path_index
 
 
@@ -256,7 +260,7 @@ def write_note(path: str, content: str) -> None:
         doc = {
             "_id": doc_id,
             "path": encrypted_path,
-            "type": "plain",
+            "type": "newnote",  # tells LiveSync to create the file, not update existing
             "mtime": 0,
             "ctime": 0,
             "size": 0,
