@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 import time
-import uuid
 
 import requests
 from cryptography.hazmat.primitives import hashes
@@ -201,10 +200,12 @@ def write_note(path: str, content: str) -> None:
 
     # Build chunk(s). Use a single chunk for simplicity; LiveSync handles any size.
     # ID must start with "h:+" (PREFIX_ENCRYPTED_CHUNK) so LiveSync treats it as encrypted.
+    # Use SHA256 of content as chunk ID for deduplication and to avoid URL-encoding issues
+    # with random UUIDs containing characters that PouchDB/CouchDB handle inconsistently.
     children: list[str] = []
     if content:
-        chunk_id = "h:+" + uuid.uuid4().hex
         encrypted_chunk = _encrypt(content)
+        chunk_id = "h:+" + hashlib.sha256(encrypted_chunk.encode()).hexdigest()[:16]
         chunk_doc = {
             "_id": chunk_id,
             "type": "leaf",
