@@ -20,8 +20,8 @@ SYNC_PARAMS_ID = "_local/obsidian_livesync_sync_parameters"
 # Caches
 _pbkdf2salt_cache: bytes | None = None
 _master_key_cache: bytes | None = None
-# path → doc_id index, populated on first list/read
-_path_index: dict[str, str] | None = None
+# path → (doc_id, children) index, populated on first list/read
+_path_index: dict[str, tuple[str, list]] | None = None
 
 
 def _session() -> requests.Session:
@@ -82,18 +82,22 @@ def _decrypt(encrypted: str) -> str:
     return plaintext.decode("utf-8")
 
 
-def _decrypt_path(path_field: str) -> str:
-    """Decrypt an encrypted path field (/\\:...) and return just the file path."""
+def _decrypt_meta(path_field: str) -> dict:
+    """Decrypt an encrypted path field (/\\:...) and return the full metadata dict.
+    Contains: path, mtime, ctime, size, children (the real chunk IDs).
+    """
     assert path_field.startswith(ENCRYPTED_META_PREFIX)
     decrypted = _decrypt(path_field[len(ENCRYPTED_META_PREFIX):])
     try:
-        return json.loads(decrypted)["path"]
-    except (json.JSONDecodeError, KeyError):
-        return decrypted
+        return json.loads(decrypted)
+    except json.JSONDecodeError:
+        return {"path": decrypted, "children": []}
 
 
-def _build_path_index(refresh: bool = False) -> dict[str, str]:
-    """Build and cache a mapping of decrypted path → doc_id for all f: documents."""
+def _build_path_index(refresh: bool = False) -> dict[str, tuple[str, list]]:
+    """Build and cache a mapping of path → (doc_id, children) for all f: documents.
+    children comes from the encrypted metadata (not the plaintext placeholder).
+    """
     global _path_index
     if _path_index is not None and not refresh:
         return _path_index
@@ -102,7 +106,7 @@ def _build_path_index(refresh: bool = False) -> dict[str, str]:
     resp = s.get(f"{_base()}/_all_docs", params={"include_docs": "true"})
     resp.raise_for_status()
 
-    index: dict[str, str] = {}
+    index: dict[str, tuple[str, list]] = {}
     for row in resp.json().get("rows", []):
         doc = row["doc"]
         doc_id = doc.get("_id", "")
@@ -114,7 +118,11 @@ def _build_path_index(refresh: bool = False) -> dict[str, str]:
         if not path_field.startswith(ENCRYPTED_META_PREFIX):
             continue
         try:
-            index[_decrypt_path(path_field)] = doc_id
+            meta = _decrypt_meta(path_field)
+            note_path = meta.get("path", "")
+            children = meta.get("children") or []
+            if note_path:
+                index[note_path] = (doc_id, children)
         except Exception:
             pass
 
@@ -130,26 +138,19 @@ def list_notes() -> list[str]:
 def read_note(path: str) -> str:
     """Return the markdown content of a note by its vault path."""
     index = _build_path_index()
-    doc_id = index.get(path)
-    if doc_id is None:
-        # Try refreshing the index once in case it's a new note
+    entry = index.get(path)
+    if entry is None:
         index = _build_path_index(refresh=True)
-        doc_id = index.get(path)
-    if doc_id is None:
+        entry = index.get(path)
+    if entry is None:
         raise FileNotFoundError(f"Note '{path}' not found.")
 
-    s = _session()
-    resp = s.get(f"{_base()}/{requests.utils.quote(doc_id, safe='')}")
-    resp.raise_for_status()
-    doc = resp.json()
+    doc_id, children = entry
 
-    children = doc.get("children", [])
     if not children:
-        data = doc.get("data", "")
-        if data.startswith(ENCRYPTED_PREFIX):
-            return _decrypt(data)
-        return data
+        return ""
 
+    s = _session()
     parts = []
     for chunk_id in children:
         chunk_resp = s.get(f"{_base()}/{requests.utils.quote(chunk_id, safe='')}")
@@ -169,7 +170,7 @@ def write_note(path: str, content: str) -> None:
     now = int(time.time() * 1000)
 
     if path in index:
-        doc_id = index[path]
+        doc_id, _ = index[path]
         existing_resp = s.get(f"{_base()}/{requests.utils.quote(doc_id, safe='')}")
         existing_resp.raise_for_status()
         existing = existing_resp.json()
@@ -196,5 +197,5 @@ def write_note(path: str, content: str) -> None:
         }
 
     s.put(f"{_base()}/{requests.utils.quote(doc_id, safe='')}", json=doc).raise_for_status()
-    # Invalidate cache so the new note shows up on next list
-    _path_index[path] = doc_id
+    # Update cache so the new note shows up on next list
+    _path_index[path] = (doc_id, [])
