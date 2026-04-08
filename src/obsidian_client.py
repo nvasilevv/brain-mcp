@@ -196,14 +196,16 @@ def write_note(path: str, content: str) -> None:
     now = int(time.time() * 1000)
 
     # Build chunk(s). Use a single chunk for simplicity; LiveSync handles any size.
+    # ID must start with "h:+" (PREFIX_ENCRYPTED_CHUNK) so LiveSync treats it as encrypted.
     children: list[str] = []
     if content:
-        chunk_id = "h:" + uuid.uuid4().hex
+        chunk_id = "h:+" + uuid.uuid4().hex
         encrypted_chunk = _encrypt(content)
         chunk_doc = {
             "_id": chunk_id,
             "type": "leaf",
             "data": encrypted_chunk,
+            "e_": True,  # marks chunk as HKDF-encrypted for LiveSync
         }
         s.put(
             f"{_base()}/{requests.utils.quote(chunk_id, safe='')}",
