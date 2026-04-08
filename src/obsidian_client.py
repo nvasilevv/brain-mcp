@@ -19,10 +19,12 @@ def list_notes() -> list[str]:
     resp = s.get(f"{_base()}/_all_docs", params={"include_docs": "false"})
     resp.raise_for_status()
     rows = resp.json().get("rows", [])
-    # Filter out CouchDB internal docs and LiveSync metadata
+    # Filter out CouchDB internals, LiveSync metadata, and chunk documents
+    skip_prefixes = ("_", "h:", "f:", "ps:")
     return [
         r["id"] for r in rows
-        if not r["id"].startswith("_") and not r["id"].startswith("h:")
+        if not any(r["id"].startswith(p) for p in skip_prefixes)
+        and "/" in r["id"] or r["id"].endswith(".md")
     ]
 
 
