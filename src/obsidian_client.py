@@ -261,7 +261,7 @@ def write_note(path: str, content: str) -> None:
         doc = {
             "_id": doc_id,
             "path": encrypted_path,
-            "type": "newnote",  # tells LiveSync to create the file, not update existing
+            "type": "plain",
             "mtime": 0,
             "ctime": 0,
             "size": 0,
